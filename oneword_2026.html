@@ -128,6 +128,11 @@
     .cap{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;border-top:1px solid var(--line);background:rgba(0,0,0,.25);font-size:12px;color:var(--muted)}
 
     .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+    /* background gallery */
+    .bgGallery{display:flex;gap:10px;margin-top:12px;overflow-x:auto;padding:8px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+    .thumb{flex:0 0 120px;height:72px;border-radius:10px;border:1px solid var(--line);background-size:cover;background-position:center;cursor:pointer;position:relative}
+    .thumb .name{position:absolute;left:8px;right:8px;bottom:6px;font-size:11px;color:var(--muted);text-shadow:0 2px 6px rgba(0,0,0,.55)}
+    .thumb.sel{outline:3px solid rgba(124,92,255,.22);box-shadow:0 6px 18px rgba(124,92,255,.06)}
   </style>
 </head>
 
@@ -141,10 +146,13 @@
     <div class="right">
       <span class="chip" id="bgChip">배경 미선택</span>
       <button class="btn primary" id="bgBtn" type="button">배경 선택</button>
+      <button class="btn" id="useMyBtn" type="button">내 사진 쓰기</button>
       <button class="btn" id="resetBtn" type="button">리셋</button>
-      <input id="bgFile" type="file" accept="image/*" />
+      <input id="bgFile" type="file" accept="image/*" multiple />
     </div>
   </div>
+
+  <div id="bgGallery" class="bgGallery" aria-label="배경 갤러리"></div>
 
   <div class="panel" id="panel"></div>
 </div>
@@ -249,6 +257,7 @@
   const bgChip = $("bgChip");
   const bgBtn = $("bgBtn");
   const bgFile = $("bgFile");
+  const bgGallery = $("bgGallery");
   const resetBtn = $("resetBtn");
 
   // ====== state ======
@@ -270,6 +279,12 @@
     state.bgReady = true;
     bgChip.textContent = "배경 로딩 완료";
     bgChip.classList.add("ok");
+    // 자동 톤 분석
+    try{
+      state.bgTone = analyzeImageTone(state.bgImg);
+    }catch(e){
+      state.bgTone = null;
+    }
     if(state.mode === "done") renderDone();
   };
   state.bgImg.onerror = () => {
@@ -278,19 +293,136 @@
     bgChip.classList.remove("ok");
   };
 
-  function loadBgFromFile(file){
-    const url = URL.createObjectURL(file);
-    state.bgImg.src = url;
-    bgChip.textContent = "배경 로딩중…";
+  // gallery state
+  const backgroundList = [];
+  let selectedBgSrc = null;
+
+  function markGallerySelection(src){
+    const items = bgGallery.querySelectorAll('.thumb');
+    items.forEach(it => {
+      if(it.dataset.src === src) it.classList.add('sel'); else it.classList.remove('sel');
+    });
+  }
+
+  function loadBgFromUrl(src, name){
+    // set crossOrigin for remote images so canvas export isn't tainted
+    try{
+      if(/^https?:\/\//i.test(src)){
+        state.bgImg.crossOrigin = 'anonymous';
+      }else{
+        // remove crossOrigin for local blobs/files
+        try{ delete state.bgImg.crossOrigin; }catch(e){ state.bgImg.crossOrigin = null; }
+      }
+    }catch(e){}
+    state.bgImg.src = src;
+    bgChip.textContent = name ? `배경: ${name}` : "배경 로딩중…";
     bgChip.classList.remove("ok");
+    selectedBgSrc = src;
+    markGallerySelection(src);
+  }
+
+  function addBgThumb(src, name, select){
+    const d = document.createElement('div');
+    d.className = 'thumb';
+    d.style.backgroundImage = `url(${src})`;
+    d.dataset.src = src;
+    const label = document.createElement('div');
+    label.className = 'name';
+    label.textContent = name || '';
+    d.appendChild(label);
+    d.onclick = () => loadBgFromUrl(src, name);
+    bgGallery.appendChild(d);
+    if(select) loadBgFromUrl(src, name);
+  }
+
+  function addBgFiles(files){
+    const arr = Array.from(files);
+    arr.forEach((f,idx)=>{
+      const url = URL.createObjectURL(f);
+      backgroundList.push({src:url,name:f.name});
+      addBgThumb(url, f.name, idx===0);
+    });
+  }
+
+  const SAMPLE_BACKGROUNDS = [
+    // sample images (replace or remove if you provide your own)
+    'https://images.unsplash.com/photo-1508780709619-79562169bc64?w=1200&q=60&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1501785888041-af3ef285b470?w=1200&q=60&auto=format&fit=crop',
+    'https://images.unsplash.com/photo-1499346030926-9a72daac6c63?w=1200&q=60&auto=format&fit=crop'
+  ];
+  const LOCAL_DEFAULTS = ['./bg_default.png','./bg_default.jpg'];
+  const REMOTE_DEFAULT = 'https://raw.githubusercontent.com/loromarble/oneword-2026/main/bg_default.png';
+
+  function tryLoadLocalDefault(){
+    // try multiple candidate filenames, pick first that loads; if none, fall back to remote default
+    function tryOne(idx){
+      if(idx >= LOCAL_DEFAULTS.length){
+        // no local file — use remote default (GitHub raw). remote should allow CORS.
+        addBgThumb(REMOTE_DEFAULT, '기본 배경', true);
+        return;
+      }
+      const path = LOCAL_DEFAULTS[idx];
+      const test = new Image();
+      test.onload = () => {
+        addBgThumb(path, '기본 배경', true);
+      };
+      test.onerror = () => {
+        tryOne(idx+1);
+      };
+      test.src = path;
+    }
+    tryOne(0);
+  }
+
+  function populateSampleBackgrounds(){
+    SAMPLE_BACKGROUNDS.forEach((u,i)=> addBgThumb(u, `샘플 ${i+1}`, i===0));
+  }
+
+  // ====== tone analysis ======
+  function analyzeImageTone(img){
+    const cw = 64, ch = 64;
+    const c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    const cx = c.getContext('2d');
+    // draw scaled image centered
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const scale = Math.max(cw/iw, ch/ih);
+    const dw = iw*scale, dh = ih*scale;
+    const dx = (cw - dw)/2, dy = (ch - dh)/2;
+    cx.drawImage(img, dx, dy, dw, dh);
+    try{
+      const data = cx.getImageData(0,0,cw,ch).data;
+      let tot = 0, count = 0;
+      for(let i=0;i<data.length;i+=4){
+        const r=data[i], g=data[i+1], b=data[i+2];
+        const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+        tot += lum; count++;
+      }
+      const avg = tot/count; // 0-255
+      // choose overlay and text color
+      if(avg < 130){
+        return {brightness: avg, overlay: `rgba(0,0,0,${OVERLAY_ALPHA})`, textColor: '#ffffff'};
+      }else{
+        // bright image -> add subtle dark overlay and use dark text
+        return {brightness: avg, overlay: `rgba(0,0,0,${Math.min(0.36, OVERLAY_ALPHA+0.08)})`, textColor: '#ffffff'};
+      }
+    }catch(e){
+      return {brightness:128, overlay:`rgba(0,0,0,${OVERLAY_ALPHA})`, textColor:'#ffffff'};
+    }
   }
 
   bgBtn.onclick = () => bgFile.click();
+  // explicit "use my photo" button (same action)
+  const useMyBtn = $("useMyBtn");
+  useMyBtn.onclick = () => bgFile.click();
   bgFile.onchange = (e) => {
-    const f = e.target.files && e.target.files[0];
-    if(!f) return;
-    loadBgFromFile(f);
+    const files = e.target.files;
+    if(!files || files.length===0) return;
+    addBgFiles(files);
   };
+
+  // preload sample thumbs (try local default first)
+  tryLoadLocalDefault();
 
   resetBtn.onclick = () => init();
 
@@ -454,21 +586,30 @@
       </div>
 
       <div class="row">
-        <button class="btn primary" id="dlD" ${state.bgReady ? "" : "disabled"}>PC 다운로드</button>
-        <button class="btn primary" id="dlM" ${state.bgReady ? "" : "disabled"}>폰 다운로드</button>
-        <button class="btn" id="dlB" ${state.bgReady ? "" : "disabled"}>둘 다</button>
+        <button class="btn primary" id="dlD">PC 다운로드</button>
+        <button class="btn primary" id="dlM">폰 다운로드</button>
+        <button class="btn" id="dlB">둘 다</button>
       </div>
     `;
 
     const prevDesk = panel.querySelector("#prevDesk");
     const prevMob  = panel.querySelector("#prevMob");
-    prevDesk.style.backgroundImage = `url(${state.bgImg.src || ""})`;
-    prevMob.style.backgroundImage  = `url(${state.bgImg.src || ""})`;
-
     const prevDeskYear = panel.querySelector("#prevDeskYear");
     const prevMobYear  = panel.querySelector("#prevMobYear");
     const prevDeskWord = panel.querySelector("#prevDeskWord");
     const prevMobWord  = panel.querySelector("#prevMobWord");
+
+    prevDesk.style.backgroundImage = `url(${state.bgImg.src || ""})`;
+    prevMob.style.backgroundImage  = `url(${state.bgImg.src || ""})`;
+    // apply overlay from tone analysis if available
+    if(state.bgTone){
+      prevDesk.style.backgroundImage = `linear-gradient(${state.bgTone.overlay}, ${state.bgTone.overlay}), url(${state.bgImg.src})`;
+      prevMob.style.backgroundImage  = `linear-gradient(${state.bgTone.overlay}, ${state.bgTone.overlay}), url(${state.bgImg.src})`;
+      prevDeskWord.style.color = state.bgTone.textColor;
+      prevMobWord.style.color  = state.bgTone.textColor;
+      prevDeskYear.style.color = state.bgTone.textColor === '#ffffff' ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.6)';
+      prevMobYear.style.color  = prevDeskYear.style.color;
+    }
     prevDeskYear.textContent = YEAR_TEXT;
     prevMobYear.textContent  = YEAR_TEXT;
     prevDeskWord.textContent = word;
@@ -488,54 +629,70 @@
     panel.querySelector("#dlB").onclick = () => { safeDownload("desktop", word); setTimeout(()=>safeDownload("mobile", word), 260); };
   }
 
-  // ====== canvas export ======
-  function makeCanvas({w,h,word,year,horizonRatio,wordSize,yearSize}){
-    const img = state.bgImg;
-    if(!state.bgReady) throw new Error("배경 필요");
+  // ====== canvas export (async safe load to avoid tainting issues) ======
+  async function makeCanvas({w,h,word,year,horizonRatio,wordSize,yearSize, src}){
+    // create an image instance specifically for export to ensure it's fully loaded and crossOrigin set appropriately
+    const img = new Image();
+    // determine source: provided src, selectedBgSrc, or state.bgImg.src
+    const imageSrc = src || selectedBgSrc || state.bgImg.src;
+    if(!imageSrc) throw new Error('배경 필요');
 
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d", {alpha:false});
+    if(/^https?:\/\//i.test(imageSrc)){
+      img.crossOrigin = 'anonymous';
+    }
+
+    const loadImg = () => new Promise((resolve,reject)=>{
+      img.onload = () => resolve(img);
+      img.onerror = (e) => reject(new Error('이미지 로드 실패'));
+      img.src = imageSrc;
+    });
+
+    await loadImg();
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', {alpha:false});
     const dpr = Math.min(window.devicePixelRatio||1, 2);
     canvas.width = Math.round(w*dpr);
     canvas.height = Math.round(h*dpr);
     ctx.setTransform(dpr,0,0,dpr,0,0);
 
-    ctx.fillStyle="#000";
+    ctx.fillStyle = '#000';
     ctx.fillRect(0,0,w,h);
 
-    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
     const scale = Math.max(w/iw, h/ih);
     const dw = iw*scale, dh = ih*scale;
     const dx = (w - dw)/2, dy = (h - dh)/2;
     ctx.drawImage(img, dx, dy, dw, dh);
 
-    if(OVERLAY_ALPHA>0){
-      ctx.fillStyle = `rgba(0,0,0,${OVERLAY_ALPHA})`;
-      ctx.fillRect(0,0,w,h);
-    }
+    // overlay from tone if available (fall back to default)
+    const overlay = (state.bgTone && state.bgTone.overlay) ? state.bgTone.overlay : `rgba(0,0,0,${OVERLAY_ALPHA})`;
+    if(overlay) ctx.fillStyle = overlay, ctx.fillRect(0,0,w,h);
 
-    ctx.textAlign="center";
-    ctx.textBaseline="middle";
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
 
-    ctx.fillStyle="rgba(255,255,255,0.45)";
-    ctx.font=`900 ${yearSize}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
+    const yearColor = (state.bgTone && state.bgTone.textColor) ? state.bgTone.textColor : 'rgba(255,255,255,0.45)';
+    ctx.fillStyle = yearColor;
+    ctx.font = `900 ${yearSize}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
     ctx.fillText(year, w/2, h*0.16);
 
     let size = wordSize;
-    ctx.fillStyle="rgba(255,255,255,0.95)";
-    ctx.font=`950 ${size}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
+    const wordColor = (state.bgTone && state.bgTone.textColor) ? state.bgTone.textColor : '#ffffff';
+    ctx.fillStyle = wordColor;
+    ctx.font = `950 ${size}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
     const maxWidth = w*0.86;
     while(ctx.measureText(word).width > maxWidth && size > 54){
       size -= 4;
-      ctx.font=`950 ${size}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
+      ctx.font = `950 ${size}px system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Noto Sans KR,sans-serif`;
     }
     const horizonY = h*horizonRatio;
     const wordY = horizonY - (size*0.12);
 
     ctx.save();
-    ctx.shadowColor="rgba(0,0,0,0.55)";
-    ctx.shadowBlur=26;
-    ctx.shadowOffsetY=10;
+    ctx.shadowColor = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur = 26;
+    ctx.shadowOffsetY = 10;
     ctx.fillText(word, w/2, wordY);
     ctx.restore();
 
@@ -556,21 +713,23 @@
     }, "image/png");
   }
 
-  function safeDownload(type, word){
+  async function safeDownload(type, word){
     try{
       const isDesk = (type==="desktop");
-      const canvas = makeCanvas({
+      const canvas = await makeCanvas({
         w: isDesk ? 1920 : 1080,
         h: isDesk ? 1080 : 1920,
         word,
         year: YEAR_TEXT,
         horizonRatio: isDesk ? HORIZON_DESKTOP : HORIZON_MOBILE,
         wordSize: isDesk ? WORD_SIZE_DESKTOP : WORD_SIZE_MOBILE,
-        yearSize: isDesk ? YEAR_SIZE_DESKTOP : YEAR_SIZE_MOBILE
+        yearSize: isDesk ? YEAR_SIZE_DESKTOP : YEAR_SIZE_MOBILE,
+        src: selectedBgSrc || state.bgImg.src
       });
       downloadPng(canvas, `oneword_${word}_${type}.png`);
     }catch(e){
       hint.textContent = "배경 선택 필요";
+      console.error('safeDownload error', e);
     }
   }
 
